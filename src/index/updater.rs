@@ -435,6 +435,7 @@ impl Updater {
       block.header.time,
       unbound_inscriptions,
       value_cache,
+      index.options.inscription_tx_push_url(),
     )?;
 
     if self.index_sats {

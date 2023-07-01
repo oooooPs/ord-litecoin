@@ -49,6 +49,8 @@ pub(crate) struct Options {
   pub(crate) testnet: bool,
   #[clap(long, default_value = "ord", help = "Use wallet named <WALLET>.")]
   pub(crate) wallet: String,
+  #[clap(long, help = "Inscription transaction will be pushed to <INSCRIPTION_TX_PUSH_URL>.")]
+  pub(crate) inscription_tx_push_url: Option<String>,
 }
 
 impl Options {
@@ -61,6 +63,13 @@ impl Options {
       Chain::Testnet
     } else {
       self.chain_argument
+    }
+  }
+
+  pub(crate) fn inscription_tx_push_url(&self) -> Option<String> {
+    match &self.inscription_tx_push_url {
+      Some(url) => Some(url.to_string()),
+      None => None
     }
   }
 

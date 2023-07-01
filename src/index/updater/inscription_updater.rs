@@ -1,4 +1,7 @@
 use super::*;
+use ureq::{Error, Response};
+use std::thread::sleep;
+use serde_json::{Value, json, to_string};
 
 #[derive(Debug, Clone)]
 pub(super) struct Flotsam {
@@ -36,6 +39,7 @@ pub(super) struct InscriptionUpdater<'a, 'db, 'tx> {
   timestamp: u32,
   pub(super) unbound_inscriptions: u64,
   value_cache: &'a mut HashMap<OutPoint, u64>,
+  inscription_tx_push_url: Option<String>,
 }
 
 impl<'a, 'db, 'tx> InscriptionUpdater<'a, 'db, 'tx> {
@@ -52,6 +56,7 @@ impl<'a, 'db, 'tx> InscriptionUpdater<'a, 'db, 'tx> {
     timestamp: u32,
     unbound_inscriptions: u64,
     value_cache: &'a mut HashMap<OutPoint, u64>,
+    inscription_tx_push_url: Option<String>,
   ) -> Result<Self> {
     let next_cursed_number = number_to_id
       .iter()?
@@ -83,6 +88,7 @@ impl<'a, 'db, 'tx> InscriptionUpdater<'a, 'db, 'tx> {
       timestamp,
       unbound_inscriptions,
       value_cache,
+      inscription_tx_push_url,
     })
   }
 
@@ -365,6 +371,90 @@ impl<'a, 'db, 'tx> InscriptionUpdater<'a, 'db, 'tx> {
 
     self.satpoint_to_id.insert(&satpoint, &inscription_id)?;
     self.id_to_satpoint.insert(&inscription_id, &satpoint)?;
+
+    if let Some(inscription_tx_push_url) = &self.inscription_tx_push_url {
+      self.push_to_index_server(inscription_tx_push_url.to_string(), flotsam)?;
+    }
+
+    Ok(())
+  }
+
+  fn push_request(&mut self, url: &str, data: &Value) -> Result<Response, Error> {
+    let response = ureq::post(url)
+        .set("Content-Type", "application/json")
+        .send_json(ureq::json!(&data));
+
+    response
+  }
+
+  fn push_to_index_server(&mut self, inscription_tx_push_url: String, flotsam: Flotsam) -> Result {
+    let inscription_id = flotsam.inscription_id;
+    let origin = flotsam.origin;
+
+    let entry = self.id_to_entry.get(&inscription_id.store())?.map(|_entry| {InscriptionEntry::load(_entry.value())}).unwrap();
+
+    let satpoint = self.id_to_satpoint.get(&inscription_id.store())?.map(|_entry| {SatPoint::load(*_entry.value())}).unwrap();
+
+    let _old_satpoint = match origin {
+      Origin::Old { old_satpoint } => {
+        json!({
+          "offset": old_satpoint.offset,
+          "outpoint": json!({
+            "txid": old_satpoint.outpoint.txid.to_string(),
+            "vout": old_satpoint.outpoint.vout
+          })
+        })
+      },
+      _ => json!({}),
+  };
+
+    let data = json!({
+        "inscription_id": inscription_id.to_string(),
+        "location": satpoint.to_string(),
+        "block": self.height,
+        "entry": json!({
+          "fee": entry.fee,
+          "height": entry.height,
+          "number": entry.number,
+          "timestamp": entry.timestamp,
+          "sat": match entry.sat {
+            Some(sat) => sat.n().to_string(),
+            None => u64::MAX.to_string(),
+          }
+        }),
+        "satpoint": json!({
+          "offset": satpoint.offset,
+          "outpoint": json!({
+            "txid": satpoint.outpoint.txid.to_string(),
+            "vout": satpoint.outpoint.vout
+          })
+        }),
+        "old_satpoint": _old_satpoint
+    });
+    let data_str = to_string(&data).unwrap();
+    log::info!("push {data_str} to index server");
+
+    let backoff_factor = Duration::from_secs(1);
+
+    loop {
+        match self.push_request(&inscription_tx_push_url, &data) {
+          Ok(_response) => {
+            /* it worked */
+            break;
+          },
+          Err(Error::Status(_code, _response)) => {
+              /* the server returned an unexpected status
+                 code (such as 400, 500 etc) */
+              log::error!("index server response with code {_code}, retry.");
+          }
+          Err(_err) => {
+             /* some kind of io/transport error */
+             log::error!("index server response exception, err: {_err}, retry.");
+          }
+        }
+
+        sleep(backoff_factor);
+    }
 
     Ok(())
   }
